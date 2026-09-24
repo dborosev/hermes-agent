@@ -48,6 +48,12 @@ import {
   setYoloActive
 } from '@/store/session'
 import type { SessionProfileRoute } from '@/store/session-request-router'
+import {
+  captureSessionTombstoneGenerations,
+  type SessionTombstoneGenerationSnapshot,
+  $removedSessionIds,
+  tombstoneLifecycleChanged
+} from '@/store/session-removal'
 import { runtimeSessionOwner, sessionTileOwnerRoute } from '@/store/session-states'
 
 // Re-exported for the many session-actions/tile call sites that already import
@@ -1805,7 +1811,31 @@ export function restoreListedSession(session: SessionInfo, slice?: ListedSession
   setSessions(prepend)
 }
 
-function upsertResolvedSession(session: SessionInfo, storedSessionId: string) {
+function upsertResolvedSession(
+  session: SessionInfo,
+  storedSessionId: string,
+  tombstoneGenerationsAtRequestStart: SessionTombstoneGenerationSnapshot
+) {
+  const removed = $removedSessionIds.get()
+  const identities = [storedSessionId, session.id, session._lineage_root_id]
+
+  // A direct by-id resolve may have started just before an archive/delete
+  // (#85163: the archive row click's bubbled resume raced the tombstone).
+  // A stale response must not undo the optimistic eviction while the mutation's
+  // tombstone is active, after the tombstone was already present at request
+  // start, or after an add → remove ABA cycle made membership look unchanged.
+  // Check every identity lineage-aware lookups use. This suppresses only the
+  // sidebar-cache upsert: the resolved row is still returned so an explicit
+  // resume-by-id can open archived history, and a later request after a
+  // settled rollback can publish normally.
+  if (
+    session.archived ||
+    identities.some(id => (id ? removed.has(id) : false)) ||
+    tombstoneLifecycleChanged(tombstoneGenerationsAtRequestStart, identities)
+  ) {
+    return
+  }
+
   const lineage = session._lineage_root_id ?? session.id
 
   // A hidden row (canonical Bot Chat, room plumbing) is unlisted by design:
@@ -1886,6 +1916,10 @@ export async function resolveStoredSession(
   storedSessionId: string,
   ownerRoute?: SessionProfileRoute
 ): Promise<SessionInfo | undefined> {
+  // Snapshot BEFORE any await: a resolve that started before an archive/delete
+  // must reject its own stale response (see upsertResolvedSession).
+  const tombstoneGenerationsAtRequestStart = captureSessionTombstoneGenerations()
+
   const cached = cachedSessionRow(storedSessionId)
 
   if (ownerRoute) {
@@ -1907,7 +1941,7 @@ export async function resolveStoredSession(
       const session = await getSession(storedSessionId, scope)
       session.profile = normalizeProfileKey(ownerRoute.profile)
       session.connection_id = ownerRoute.connectionId
-      upsertResolvedSession(session, storedSessionId)
+      upsertResolvedSession(session, storedSessionId, tombstoneGenerationsAtRequestStart)
 
       return session
     } catch {
@@ -1941,7 +1975,7 @@ export async function resolveStoredSession(
     // stamp is preserved for backend compatibility.
     session.profile ||= activeKey
 
-    upsertResolvedSession(session, storedSessionId)
+    upsertResolvedSession(session, storedSessionId, tombstoneGenerationsAtRequestStart)
 
     return session
   } catch {
@@ -1967,7 +2001,7 @@ export async function resolveStoredSession(
       // forwarding, so that backend answers as its own "default").
       session.profile = profile
 
-      upsertResolvedSession(session, storedSessionId)
+      upsertResolvedSession(session, storedSessionId, tombstoneGenerationsAtRequestStart)
 
       return session
     } catch {
