@@ -14,7 +14,8 @@ export {
   textPart
 } from './parts'
 export type { UnspokenTurnSpeech } from './parts'
-export { branchGroupForUser, preserveLocalAssistantErrors } from './reconciliation'
+export { branchGroupForUser, preserveLocalAssistantErrors, spliceOlderPreservedRows } from './reconciliation'
+export { sameAttachmentTurn } from './attachment-turn'
 export {
   restorePendingBlockingToolCall,
   restorePendingClarifyToolCall,
